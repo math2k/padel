@@ -1,106 +1,104 @@
-import json
 import smtplib
 import logging
+import sqlite3
 from email.mime.text import MIMEText
-from datetime import datetime
-from pathlib import Path
-from app import get_available_slots, process_slots, TimeSlot, COURT_NAMES
+from datetime import datetime, date
+# Import depuis app.py (plus de fonctions de log notifications)
+from app import (
+    get_available_slots, process_slots, get_db_connection, 
+    get_stored_slots, save_slots_snapshot, TimeSlot
+)
 
-# --- CONFIGURATION EMAIL (SERVEUR LOCAL) ---
+# --- CONFIGURATION EMAIL ---
 SMTP_SERVER = "localhost"
 SMTP_PORT = 25
-# L'adresse d'expédition (doit souvent correspondre au domaine du serveur pour éviter le spam)
-FROM_EMAIL = "no-reply@padel.math2k.net" 
+FROM_EMAIL = "padel-monitor@4lunch.eu"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-# Chemin vers le fichier d'abonnements
-SUBSCRIPTIONS_FILE = Path('/var/www/vhosts/padel.math2k.net/data/subscriptions.json')
 
-def send_notification(email, slots, date_str):
-    subject = f"🎾 Terrain disponible le {date_str} !"
-    body = f"Bonne nouvelle ! Des terrains sont disponibles pour le {date_str} :\n\n"
-    
-    for slot in slots:
+def send_notification(email, new_slots, date_str):
+    subject = f"🎾 Nouveaux terrains dispo le {date_str} !"
+    body = f"De nouveaux terrains viennent de se libérer pour le {date_str} :\n\n"
+    for slot in new_slots:
         body += f"- {slot.court_name} à {slot.starts_at} ({slot.duration} min)\n"
     
     body += "\nRéservez vite sur : https://app.arenal.be/club/3"
-
     msg = MIMEText(body)
     msg['Subject'] = subject
     msg['From'] = FROM_EMAIL
     msg['To'] = email
 
     try:
-        # Connexion au serveur local (généralement sans authentification depuis localhost)
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.send_message(msg)
         logging.info(f"Email envoyé à {email}")
         return True
     except Exception as e:
-        logging.error(f"Erreur envoi email: {e}")
+        logging.error(f"Erreur envoi email à {email}: {e}")
         return False
 
 def check_subscriptions():
-    # Vérification de l'existence du fichier
-    if not SUBSCRIPTIONS_FILE.exists():
-        logging.info("Aucun abonnement trouvé.")
-        return
-
+    conn = get_db_connection()
     try:
-        with SUBSCRIPTIONS_FILE.open('r') as f:
-            subs = json.load(f)
-    except json.JSONDecodeError:
-        logging.error("Erreur de décodage du fichier abonnements.")
-        return
-    
-    if not subs:
-        return
+        # 1. Nettoyage des abonnements expirés
+        today_str = date.today().strftime('%Y-%m-%d')
+        conn.execute("DELETE FROM subscriptions WHERE target_date < ?", (today_str,))
+        conn.commit()
 
-    active_subs = []
-    
-    # Grouper les vérifications par date pour limiter les appels API
-    dates_to_check = set(s['date'] for s in subs)
-    slots_cache = {} 
+        # 2. Récupérer les abonnements
+        subs = conn.execute("SELECT * FROM subscriptions").fetchall()
+        if not subs:
+            logging.info("Aucun abonnement actif.")
+            return
 
-    for date_str in dates_to_check:
-        # Ignorer les dates passées
-        if datetime.strptime(date_str, '%Y-%m-%d').date() < datetime.now().date():
-            continue
+        dates_to_check = set(row['target_date'] for row in subs)
+
+        for date_str in dates_to_check:
+            # A. Charger l'état "connu"
+            previous_slots = get_stored_slots(date_str)
             
-        slots_raw = get_available_slots(date_str)
-        slots_cache[date_str] = process_slots(slots_raw)
+            # B. Récupérer l'état actuel (Live)
+            slots_raw = get_available_slots(date_str)
+            current_slots_list = process_slots(slots_raw)
+            current_slots_set = set(current_slots_list)
+            
+            # C. Détecter les NOUVEAUX créneaux
+            newly_found_slots = current_slots_set - previous_slots
+            
+            # S'il n'y a rien de nouveau, on met à jour le snapshot (si des créneaux ont disparu) et on passe
+            if not newly_found_slots:
+                if current_slots_set != previous_slots:
+                     save_slots_snapshot(current_slots_set, date_str)
+                continue
 
-    for sub in subs:
-        date_str = sub['date']
-        
-        # Nettoyage des dates passées
-        if datetime.strptime(date_str, '%Y-%m-%d').date() < datetime.now().date():
-            continue
+            logging.info(f"Date {date_str}: {len(newly_found_slots)} nouveaux slots détectés.")
 
-        available = slots_cache.get(date_str, [])
-        
-        # Filtres utilisateur
-        min_time_obj = datetime.strptime(sub['min_time'], '%H:%M').time()
-        
-        matching_slots = [
-            slot for slot in available
-            if datetime.strptime(slot.starts_at, '%H:%M').time() >= min_time_obj
-            and slot.duration >= sub['min_duration']
-        ]
+            # D. Notifier les abonnés
+            relevant_subs = [s for s in subs if s['target_date'] == date_str]
+            
+            for sub in relevant_subs:
+                min_time_obj = datetime.strptime(sub['min_time'], '%H:%M').time()
+                
+                # Filtrer par critères utilisateur
+                matching_slots = [
+                    s for s in newly_found_slots
+                    if datetime.strptime(s.starts_at, '%H:%M').time() >= min_time_obj
+                    and s.duration >= sub['min_duration']
+                ]
+                
+                if matching_slots:
+                    matching_slots.sort(key=lambda x: x.starts_at)
+                    send_notification(sub['email'], matching_slots, date_str)
 
-        if matching_slots:
-            logging.info(f"Match trouvé pour {sub['email']} le {date_str}")
-            sent = send_notification(sub['email'], matching_slots, date_str)
-            if sent:
-                # Suppression de l'abonnement après notification réussie
-                continue 
+            # E. Mise à jour de l'état global APRES les notifications
+            # On considère que si on a détecté des nouveaux slots et essayé de notifier,
+            # on ne doit plus les considérer comme "nouveaux" au prochain tour.
+            save_slots_snapshot(current_slots_set, date_str)
         
-        # On conserve l'abonnement s'il n'a pas été notifié
-        active_subs.append(sub)
-
-    # Mise à jour du fichier JSON
-    with SUBSCRIPTIONS_FILE.open('w') as f:
-        json.dump(active_subs, f, indent=4)
+    except Exception as e:
+        logging.error(f"Erreur monitoring: {e}")
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     check_subscriptions()
