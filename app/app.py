@@ -115,10 +115,30 @@ def save_current_slots(slots: Set[TimeSlot], state_file: Path):
         logging.error(f"Error saving state file: {e}")
 
 # --- Configuration et Routes Flask ---
-state_dir = Path('./data')
+state_dir = Path('/var/www/vhosts/padel.math2k.net//data')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-@app.route('/', methods=['GET']) # Seule la méthode GET est maintenant nécessaire
+# --- Nouvelle gestion des abonnements ---
+SUBSCRIPTIONS_FILE = state_dir / "subscriptions.json"
+
+def load_subscriptions() -> List[Dict]:
+    if not SUBSCRIPTIONS_FILE.exists():
+        return []
+    try:
+        with SUBSCRIPTIONS_FILE.open('r') as f:
+            return json.load(f)
+    except Exception as e:
+        logging.error(f"Erreur lecture abonnements: {e}")
+        return []
+
+def save_subscription(data: Dict):
+    subs = load_subscriptions()
+    subs.append(data)
+    SUBSCRIPTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with SUBSCRIPTIONS_FILE.open('w') as f:
+        json.dump(subs, f, indent=4)
+
+@app.route('/', methods=['GET'])
 def index():
     # Définir les valeurs par défaut
     check_date_str = date.today().strftime('%Y-%m-%d')
@@ -132,12 +152,10 @@ def index():
     
     # Vérifier si des arguments sont dans l'URL (signifie que le formulaire a été soumis)
     if 'date' in request.args:
-        # Récupérer les paramètres depuis request.args au lieu de request.form
         check_date_str = request.args.get('date', check_date_str)
         min_time_str = request.args.get('min_time', min_time_str)
         min_duration_str = request.args.get('min_duration', min_duration_str)
         check_date_obj = datetime.strptime(check_date_str, '%Y-%m-%d').date()
-        # Format it nicely for display in the results title
         display_date = check_date_obj.strftime('%A %d %B %Y')
         
         try:
@@ -145,7 +163,6 @@ def index():
             min_time_obj = datetime.strptime(min_time_str, '%H:%M').time()
             state_file = state_dir / f"slots_{check_date_str}.json"
 
-            # Le reste de la logique ne change pas
             previous_slots = load_previous_slots(state_file)
             available_slots_raw = get_available_slots(check_date_str)
             all_slots = process_slots(available_slots_raw)
@@ -177,10 +194,34 @@ def index():
                            slots_by_time=slots_by_time,
                            newly_found_slots=newly_found_slots,
                            error=error_message,
-                           # On ajoute une variable pour savoir si une recherche a été effectuée
                            searched=('date' in request.args),
                            display_date = display_date)
 
+@app.route('/subscribe', methods=['POST'])
+def subscribe():
+    email = request.form.get('email')
+    date_req = request.form.get('date')
+    min_time = request.form.get('min_time')
+    min_duration = request.form.get('min_duration')
+    
+    if email and date_req:
+        sub_data = {
+            "email": email,
+            "date": date_req,
+            "min_time": min_time,
+            "min_duration": int(min_duration),
+            "created_at": datetime.now().isoformat()
+        }
+        save_subscription(sub_data)
+        # On retourne la template avec un message de succès
+        return render_template('index.html', 
+                               success_message="Alerte enregistrée ! Vous recevrez un email si un terrain se libère.",
+                               check_date=date_req, 
+                               min_time=min_time, 
+                               min_duration=min_duration,
+                               searched=False) # On ne relance pas la recherche visuelle
+    
+    return render_template('index.html', error="Email et date requis pour l'alerte.")
 
 if __name__ == "__main__":
     app.run(debug=True)
