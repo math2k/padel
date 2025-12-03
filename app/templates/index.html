@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Padel Arenal</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 2em; background-color: #f4f4f9; color: #333; }
+        .container { max-width: 800px; margin: auto; background: white; padding: 2em; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h1, h2 { color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; }
+        .form-container { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1em; align-items: end; margin-bottom: 2em; }
+        .form-group { display: flex; flex-direction: column; }
+        label { margin-bottom: 0.5em; font-weight: bold; }
+        input, button { padding: 0.8em; font-size: 1em; border-radius: 4px; border: 1px solid #ccc; }
+        button { background-color: #007bff; color: white; border: none; cursor: pointer; transition: background-color 0.2s; }
+        button:hover { background-color: #0056b3; }
+        .results { margin-top: 2em; }
+        .slot-group { margin-bottom: 1.5em; }
+        .slot-time { font-size: 1.5em; color: #0056b3; padding-bottom: 0.5em; margin-bottom: 0.5em; }
+        .slot-item { padding: 0.8em; border-left: 4px solid #ccc; margin-left: 1em; background-color: #f9f9f9; margin-bottom: 0.5em; border-radius: 0 4px 4px 0; }
+        .slot-item.new { border-left-color: #28a745; background-color: #e8f5e9; }
+        .slot-item.new::before { content: "✨ NOUVEAU"; color: #28a745; font-size: 0.8em; font-weight: bold; margin-right: 1em; }
+        .no-slots, .error { text-align: center; padding: 2em; background-color: #fff3cd; border: 1px solid #ffeeba; color: #856404; border-radius: 4px; }
+        .error { background-color: #f8d7da; border-color: #f5c6cb; color: #721c24;}
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🎾 Terrains padel indoor dispo à Arenal ?</h1>
+
+    <form method="GET">
+        <div class="form-container">
+            <div class="form-group">
+                <label for="date">Date :</label>
+                <input type="date" id="date" name="date" value="{{ check_date }}">
+            </div>
+            <div class="form-group">
+                <label for="min_time">À partir de :</label>
+                <input type="time" id="min_time" name="min_time" value="{{ min_time }}">
+            </div>
+            <div class="form-group">
+                <label for="min_duration">Durée min. (min) :</label>
+                <input type="number" id="min_duration" name="min_duration" value="{{ min_duration }}">
+            </div>
+            <button type="submit">Rechercher</button>
+        </div>
+    </form>
+    
+    {% if error %}
+        <p class="error">{{ error }}</p>
+    {% endif %}
+
+    {% if searched and not error %}
+        <div class="results">
+            <h2>Résultats pour le {{ display_date }}</h2>
+            {% if slots_by_time %}
+                {% for time, slots in slots_by_time|dictsort %}
+                    <div class="slot-group">
+                        <h3 class="slot-time">{{ time }}</h3>
+                        {% for slot in slots %}
+                            <div class="slot-item {% if slot in new_slots_hashes %}new{% endif %}">
+                                <strong>{{ slot.court_name }}</strong> - Durée : {{ slot.duration }} minutes
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% endfor %}
+            {% else %}
+                <p class="no-slots">Aucun créneau disponible pour ces critères.</p>
+            {% endif %}
+        </div>
+    {% endif %}
+
+</div>
+
+</body>
+</html>
